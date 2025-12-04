@@ -1,0 +1,87 @@
+use pqcrypto_kyber::kyber1024::*;
+use pqcrypto_dilithium::dilithium5::*;
+use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, NewAead};
+use rand::RngCore;
+
+// -----------------------------
+// 1. Key Generation
+// -----------------------------
+pub struct KeySet {
+    pub kyber_public: PublicKey,
+    pub kyber_private: SecretKey,
+    pub dilithium_public: PublicKeyDilithium,
+    pub dilithium_private: SecretKeyDilithium,
+}
+
+pub fn generate_keys() -> KeySet {
+    let (kp, ks) = keypair();
+    let (dp, ds) = keypair_dilithium();
+
+    KeySet {
+        kyber_public: kp,
+        kyber_private: ks,
+        dilithium_public: dp,
+        dilithium_private: ds,
+    }
+}
+
+// -----------------------------
+// 2. Encrypt (Kyber + AES-256-GCM)
+// -----------------------------
+pub struct Encrypted {
+    pub kem_ciphertext: Ciphertext,
+    pub aes_iv: Vec<u8>,
+    pub aes_ciphertext: Vec<u8>,
+    pub aes_tag: Vec<u8>,
+}
+
+pub fn encrypt_message(msg: &[u8], pubkey: &PublicKey) -> Encrypted {
+    let (kem_ct, shared) = encapsulate(pubkey);
+
+    let aes_key = Key::<Aes256Gcm>::from_slice(&shared.as_bytes()[..32]);
+    let cipher = Aes256Gcm::new(aes_key);
+
+    let mut iv = vec![0u8; 12];
+    rand::thread_rng().fill_bytes(&mut iv);
+
+    let nonce = Nonce::from_slice(&iv);
+    let encrypted = cipher.encrypt(nonce, msg).expect("encryption failed");
+
+    Encrypted {
+        kem_ciphertext: kem_ct,
+        aes_iv: iv,
+        aes_tag: encrypted[..16].to_vec(),
+        aes_ciphertext: encrypted[16..].to_vec(),
+    }
+}
+
+// -----------------------------
+// 3. Decrypt
+// -----------------------------
+pub fn decrypt_message(enc: &Encrypted, privkey: &SecretKey) -> Vec<u8> {
+    let shared = decapsulate(&enc.kem_ciphertext, privkey);
+    let aes_key = Key::<Aes256Gcm>::from_slice(&shared.as_bytes()[..32]);
+    let cipher = Aes256Gcm::new(aes_key);
+
+    let mut full = vec![];
+    full.extend_from_slice(&enc.aes_tag);
+    full.extend_from_slice(&enc.aes_ciphertext);
+
+    let nonce = Nonce::from_slice(&enc.aes_iv);
+    cipher.decrypt(nonce, full.as_ref()).expect("decryption failed")
+}
+
+// -----------------------------
+// 4. Signature (Dilithium)
+// -----------------------------
+pub fn sign_message(msg: &[u8], privkey: &SecretKeyDilithium) -> Vec<u8> {
+    sign(msg, privkey).as_bytes().to_vec()
+}
+
+pub fn verify_signature(msg: &[u8], sig: &[u8], pubkey: &PublicKeyDilithium) -> bool {
+    verify(
+        &pqcrypto_dilithium::dilithium5::SignedMessage::from_bytes(sig).unwrap(),
+        pubkey
+    ).is_ok()
+}
